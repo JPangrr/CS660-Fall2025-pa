@@ -15,7 +15,6 @@ const TupleDesc &DbFile::getTupleDesc() const { return td; }
 
 DbFile::DbFile(const std::string &name, const TupleDesc &td) : name(name), td(td) {
     // Open file with read/write permissions, create if it doesn't exist
-    fd = open(name.c_str(), O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
     fd = open(name.c_str(), O_RDWR | O_CREAT | O_BINARY, S_IRUSR | S_IWUSR);
     if (fd < 0) {
         throw std::runtime_error("Failed to open file: " + name);
