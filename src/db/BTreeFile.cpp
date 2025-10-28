@@ -116,14 +116,81 @@ void BTreeFile::insertTuple(const Tuple &t) {
       Page &parent_page = buffer_pool.getPage({name, parent_id});
       IndexPage parent{parent_page};
 
-      const uint16_t parent_before = parent.header->size;
-      bool parent_full = parent.insert(key_to_insert, child_page_id);
-      const uint16_t parent_after = parent.header->size;
-      buffer_pool.markDirty({name, parent_id});
+      size_t insert_pos = 0;
+      while (insert_pos < parent.header->size && parent.keys[insert_pos] < key_to_insert) {
+        insert_pos++;
+      }
 
-      if (parent_after == parent_before || !parent_full) {
+      if (insert_pos < parent.header->size && parent.keys[insert_pos] == key_to_insert) {
+        parent.children[insert_pos + 1] = child_page_id;
+        buffer_pool.markDirty({name, parent_id});
         return;
       }
+
+      bool parent_has_space = parent.header->size < parent.capacity;
+      std::vector<int> temp_keys;
+      std::vector<size_t> temp_children;
+
+      if (parent_has_space) {
+        for (uint16_t i = parent.header->size; i > insert_pos; --i) {
+          parent.keys[i] = parent.keys[i - 1];
+        }
+        for (uint16_t i = parent.header->size + 1; i > insert_pos + 1; --i) {
+          parent.children[i] = parent.children[i - 1];
+        }
+
+        parent.keys[insert_pos] = key_to_insert;
+        parent.children[insert_pos + 1] = child_page_id;
+        parent.header->size++;
+        buffer_pool.markDirty({name, parent_id});
+
+        if (parent.header->size < parent.capacity) {
+          return;
+        }
+
+        temp_keys.assign(parent.keys, parent.keys + parent.header->size);
+        temp_children.assign(parent.children, parent.children + parent.header->size + 1);
+      } else {
+        const uint16_t size = parent.header->size;
+        temp_keys.resize(size + 1);
+        temp_children.resize(size + 2);
+        std::copy(parent.keys, parent.keys + size, temp_keys.begin());
+        std::copy(parent.children, parent.children + size + 1, temp_children.begin());
+
+        for (uint16_t i = size; i > insert_pos; --i) {
+          temp_keys[i] = temp_keys[i - 1];
+        }
+        for (uint16_t i = size + 1; i > insert_pos + 1; --i) {
+          temp_children[i] = temp_children[i - 1];
+        }
+
+        temp_keys[insert_pos] = key_to_insert;
+        temp_children[insert_pos + 1] = child_page_id;
+      }
+
+      const uint16_t total_keys = temp_keys.size();
+      const uint16_t mid = total_keys / 2;
+      const int promote = temp_keys[mid];
+      const uint16_t left_count = mid;
+      const uint16_t right_count = total_keys - mid - 1;
+      const bool index_children = parent.header->index_children;
+
+      auto fill_left = [&](void) {
+        for (uint16_t i = 0; i < left_count; ++i) {
+          parent.keys[i] = temp_keys[i];
+        }
+        for (uint16_t i = left_count; i < parent.capacity; ++i) {
+          parent.keys[i] = 0;
+        }
+        for (uint16_t i = 0; i <= left_count; ++i) {
+          parent.children[i] = temp_children[i];
+        }
+        for (uint16_t i = left_count + 1; i <= parent.capacity; ++i) {
+          parent.children[i] = 0;
+        }
+        parent.header->size = left_count;
+        parent.header->index_children = index_children;
+      };
 
       if (parent_id == root_id) {
         size_t left_id = allocate_page();
@@ -132,17 +199,33 @@ void BTreeFile::insertTuple(const Tuple &t) {
         Page &left_page = buffer_pool.getPage({name, left_id});
         Page &right_page = buffer_pool.getPage({name, right_id});
 
-        std::copy(parent_page.begin(), parent_page.end(), left_page.begin());
-
         IndexPage left{left_page};
         IndexPage right{right_page};
-        int new_root_key = left.split(right);
+
+        left.header->index_children = index_children;
+        right.header->index_children = index_children;
+
+        for (uint16_t i = 0; i < left_count; ++i) {
+          left.keys[i] = temp_keys[i];
+        }
+        left.header->size = left_count;
+        for (uint16_t i = 0; i <= left_count; ++i) {
+          left.children[i] = temp_children[i];
+        }
+
+        for (uint16_t i = 0; i < right_count; ++i) {
+          right.keys[i] = temp_keys[mid + 1 + i];
+        }
+        right.header->size = right_count;
+        for (uint16_t i = 0; i <= right_count; ++i) {
+          right.children[i] = temp_children[mid + 1 + i];
+        }
 
         std::fill(parent_page.begin(), parent_page.end(), 0);
         IndexPage new_root{parent_page};
         new_root.header->size = 1;
         new_root.header->index_children = true;
-        new_root.keys[0] = new_root_key;
+        new_root.keys[0] = promote;
         new_root.children[0] = left_id;
         new_root.children[1] = right_id;
 
@@ -156,7 +239,17 @@ void BTreeFile::insertTuple(const Tuple &t) {
       Page &new_index_page = buffer_pool.getPage({name, new_index_id});
       IndexPage new_index{new_index_page};
 
-      int promote = parent.split(new_index);
+      new_index.header->index_children = index_children;
+      new_index.header->size = right_count;
+
+      for (uint16_t i = 0; i < right_count; ++i) {
+        new_index.keys[i] = temp_keys[mid + 1 + i];
+      }
+      for (uint16_t i = 0; i <= right_count; ++i) {
+        new_index.children[i] = temp_children[mid + 1 + i];
+      }
+
+      fill_left();
       buffer_pool.markDirty({name, parent_id});
       buffer_pool.markDirty({name, new_index_id});
 
